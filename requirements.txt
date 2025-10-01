@@ -1,0 +1,3 @@
+pandas
+gcsfs
+st-files-connection
