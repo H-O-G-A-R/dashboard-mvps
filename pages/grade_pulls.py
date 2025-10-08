@@ -41,6 +41,7 @@ def check_password(password: str) -> bool:
     return hashlib.sha256(password.encode()).hexdigest() == PASSWORD_HASH
 
 
+@st.cache_data(ttl=600)
 def get_students(start_date: datetime, end_date: datetime):
     """Function to pull student data between dates
     """
@@ -66,6 +67,7 @@ def get_students(start_date: datetime, end_date: datetime):
     return joined_students
 
 
+@st.cache_data(ttl=600)
 def get_assignments(end_date):
     closest_file = None
     closest_date = None
@@ -102,7 +104,7 @@ if not st.session_state.authenticated:
     if password_input:
         if check_password(password_input):
             st.session_state.authenticated = True
-            st.rerun()
+            st.stop()
         else:
             st.error("Incorrect password")
 else:
