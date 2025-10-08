@@ -1,3 +1,5 @@
-pandas
-gcsfs
+streamlit
 st-files-connection
+pandas
+numpy
+plotly
