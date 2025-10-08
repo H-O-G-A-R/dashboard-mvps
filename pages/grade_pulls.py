@@ -15,7 +15,6 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 
-
 # constants
 PASSWORD_HASH = "27e51d34338d8d346e1574cb9a10c11787754a892e2916562c6fa785abec8249"
 # connections
@@ -23,14 +22,26 @@ conn = st.connection('gcs', type=FilesConnection)
 STUDENT_SOURCE = "dsteam-data/canvas/students"
 GRADE_SOURCE = "dsteam-data/canvas/grades"
 # regex patterns
-name_pattern = re.compile(r"^(\d{3,})_(\d{4}-\d{2}-\d{2})\.csv$")
+name_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2})\.csv$")
+
+# color-palettes
+ipp_colors = {
+    "On Track": "#1F77B4",
+    "IPP": "#FF0000",
+    "Warning": "#66B2FF"
+}
+assign_colors = {
+    ">95%": "#1F77B4",
+    "<85%": "#FF0000",
+    "85-94%": "#66B2FF"
+}
 
 
 def check_password(password: str) -> bool:
     return hashlib.sha256(password.encode()).hexdigest() == PASSWORD_HASH
 
 
-def get_students(course_id: str, start_date: datetime, end_date: datetime):
+def get_students(start_date: datetime, end_date: datetime):
     """Function to pull student data between dates
     """
 
@@ -40,12 +51,12 @@ def get_students(course_id: str, start_date: datetime, end_date: datetime):
         for name in filenames:
             match = name_pattern.match(name)
             # files guaranteed to exist so no need to check for None
-            cid, datestr = match.groups()
+            datestr = match.group(1)
 
             # get date
             fdate = datetime.strptime(datestr, "%Y-%m-%d")
 
-            if cid == course_id and (start_date <= fdate <= end_date):
+            if start_date <= fdate <= end_date:
                 # open data as pd object
                 df = conn.read(f"{dirpath}/{name}", input_format="csv", ttl=600)
                 # append as files to process
@@ -55,7 +66,7 @@ def get_students(course_id: str, start_date: datetime, end_date: datetime):
     return joined_students
 
 
-def get_assignments(course_id, end_date):
+def get_assignments(end_date):
     closest_file = None
     closest_date = None
 
@@ -63,12 +74,12 @@ def get_assignments(course_id, end_date):
         for name in filenames:
             match = name_pattern.match(name)
             # files guaranteed to exist so no need to check for None
-            cid, datestr = match.groups()
+            datestr = match.group(1)
 
             # get date
             fdate = datetime.strptime(datestr, "%Y-%m-%d")
 
-            if course_id == cid and fdate <= end_date:
+            if fdate <= end_date:
                 if closest_date is None or fdate > closest_date:
                     closest_date = fdate
                     closest_file = name
@@ -77,7 +88,7 @@ def get_assignments(course_id, end_date):
 
 
 st.set_page_config(
-    page_title="Dashboard Template",
+    page_title="IPP Template",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -98,7 +109,7 @@ else:
     st.sidebar.header("Filter")
     course_id = st.sidebar.selectbox(
         "Select Course ID",
-        options=["172", "176"],
+        options=[172, 176],
         index=0
     )
     start_date = st.sidebar.date_input(
@@ -114,19 +125,27 @@ else:
         max_value=date.today()
     )
     st.sidebar.subheader("Actions")
-    st.sidebar.button("View Raw Grades")
-    st.sidebar.button("Generate IPP Report")
-    st.sidebar.button("Email Students Below Threshold")
+    if st.sidebar.button("View Raw Grades", key="Grades"):
+        st.session_state["show_grade_modal"] = True
+    if st.sidebar.button("Generate IPP Report", key="Report"):
+        st.session_state["show_ipp_modal"] = True
 
     # transform datetimes
     start_date = datetime.combine(start_date, datetime.min.time())
     end_date = datetime.combine(end_date, datetime.min.time())
 
     # pull data
-    student_data = get_students(course_id, start_date, end_date)
-    assignment_data = get_assignments(course_id, end_date)
+    student_data = get_students(start_date, end_date)
+    assignment_data = get_assignments(end_date)
 
-    top_col1, top_col2, top_col3 = st.columns(3, gap="large")
+    # filter according to course id
+    student_data = student_data[student_data["course"] == int(course_id)]
+    assignment_data = assignment_data[assignment_data["course"] == int(course_id)]
+
+    top_col1, top_col2, top_col3 = st.columns(
+        3, gap="small", vertical_alignment="center", border=True
+    )
+
     with top_col1:
         student_data["date"] = pd.to_datetime(student_data["date"])
 
@@ -138,23 +157,51 @@ else:
         latest_grades.loc[:, "category"] = np.where(
             (latest_grades["current_grade"] >= 75) & (latest_grades["current_grade"] < 80),
             "Warning", latest_grades["category"])
-        latest_grades.loc[:, "category"] = np.where(latest_grades["current_grade"] <= 74, "Below 75% - IPP", latest_grades["category"])
+        latest_grades.loc[:, "category"] = np.where(latest_grades["current_grade"] <= 74, "IPP", latest_grades["category"])
 
-        gpa_ratios = latest_grades["category"].value_counts(normalize=True).reset_index()
+        # calculate proportions of gpa sections while preserving student names
+        agg_gpa = (
+            latest_grades
+            .groupby('category', as_index=False)
+            .agg(
+                proportion=("current_grade", "size"),
+                students=("name", lambda x: "<br>".join(sorted(x)))
+            )
+        )
+        agg_gpa["proportion"] = agg_gpa["proportion"] / agg_gpa["proportion"].sum()
 
-        fig_gpa = px.pie(gpa_ratios, values='proportion', names='category', title='GPA')
-        fig_gpa.update_traces(hole=0.5)
+        fig_gpa = px.pie(
+            agg_gpa, values='proportion', names='category', color="category",
+            color_discrete_map=ipp_colors, title='Current GPA', custom_data=["students"]
+        )
+        fig_gpa.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5,
+                bgcolor="rgba(255,255,255,0.8)"
+            )
+        )
+
+        fig_gpa.update_traces(
+            hole=0.6,
+            hoverlabel=dict(font_size=11),
+            name="",
+            hovertemplate=(
+                "<b>Students in %{label}</b><br>" +
+                "%{customdata[0]}"
+            )
+        )
 
         select_gpa = st.plotly_chart(
             fig_gpa,
             use_container_width=True,
-            on_select="rerun",
             key="gpa"
         )
-
-        if select_gpa.selection:
-            print(select_gpa)
-            #selected_category = gpa_ratios.loc[select_gpa[0], 'Category']
 
     with top_col2:
         # filter for attendance
@@ -163,66 +210,220 @@ else:
         # label attendance rates
         attendance.loc[:, "category"] = np.where(attendance["score"] >= 90, "On Track", None)
         attendance.loc[:, "category"] = np.where(
-            (attendance["score"] >= 75) & (attendance["score"] < 89),
+            (attendance["score"] >= 75) & (attendance["score"] < 90),
             "Warning", attendance["category"])
-        attendance.loc[:, "category"] = np.where(attendance["score"] <= 74, "Below 75% - IPP", attendance["category"])
+        attendance.loc[:, "category"] = np.where(attendance["score"] <= 74, "IPP", attendance["category"])
 
-        attend_ratios = attendance["category"].value_counts(normalize=True).reset_index()
+        # join with students to get names
+        attend_names = pd.merge(attendance, latest_grades, left_on="user_id", right_on="user_id")[["user_id", "score", "name", "category_x"]]
 
-        fig_attend = px.pie(attend_ratios, values='proportion', names='category', title='Attendance Rates')
-        fig_attend.update_traces(hole=0.5)
+        # calculate proportions of attendance sections while preserving student names
+        agg_attend = (
+            attend_names
+            .groupby('category_x', as_index=False)
+            .agg(
+                proportion=("score", "size"),
+                students=("name", lambda x: "<br>".join(sorted(x)))
+            )
+        )
+        agg_attend["proportion"] = agg_attend["proportion"] / agg_attend["proportion"].sum()
 
-        st.plotly_chart(fig_attend, use_container_width=True)
-
-    with top_col3:
-        st.subheader("Unsubmitted Assignments")
-        # filter for applicable assignments
-        filtered_data = assignment_data[
-            (assignment_data["title"] != "Roll Call Attendance") &
-            (assignment_data["points_possible"].notna())
-        ][["assign_id", "title", "user_id", "submitted_at"]]
-        # count up null assignments
-        missing_assign = filtered_data.isna().\
-            groupby(filtered_data["user_id"])["submitted_at"].\
-            sum().reset_index()
-
-        #st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("GPA Progression")
-    student_data["date"] = pd.to_datetime(student_data["date"])
-
-    mean_grade = student_data["current_grade"].mean()
-    std_grade = student_data["current_grade"].std()
-    threshold = mean_grade - 2 * std_grade
-
-    # Flag students below threshold
-    student_data["outlier"] = student_data["current_grade"] < threshold
-
-    # Build figure
-    fig = go.Figure()
-
-    for uid, g in student_data.groupby("name"):
-        is_outlier = g["outlier"].any()
-        color = "red" if is_outlier else "grey"
-
-        fig.add_trace(
-            go.Scatter(
-                x=g["date"],
-                y=g["current_grade"],
-                mode="lines+markers",
-                name=str(uid),
-                line=dict(color=color),
-                marker=dict(color=color),
-                showlegend=False
+        fig_attend = px.pie(
+            agg_attend, values='proportion', names='category_x', color="category_x",
+            color_discrete_map=ipp_colors, title='Current Attendance Rates', custom_data=["students"]
+        )
+        fig_attend.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5,
+                bgcolor="rgba(255,255,255,0.8)"
             )
         )
 
-    # Update layout
-    fig.update_layout(
-        xaxis_title="Date",
-        yaxis_title="Current Grade",
-        template="plotly_white",
-        height=600
+        fig_attend.update_traces(
+            hole=0.6,
+            hoverlabel=dict(font_size=11),
+            name="",
+            hovertemplate=(
+                "<b>Students in %{label}</b><br>" +
+                "%{customdata[0]}"
+            )
+        )
+
+        select_attend = st.plotly_chart(
+            fig_attend,
+            use_container_width=True,
+            key="attend"
+        )
+
+    with top_col3:
+        # filter for applicable assignments
+        filtered_assign = assignment_data[
+            (assignment_data["title"] != "Roll Call Attendance") &
+            (assignment_data["points_possible"].notna())
+        ]
+        # count up unsubmitted/late assignments
+        filtered_assign.loc[:, "on_time"] = np.where(
+            filtered_assign["submitted_at"].notna() & (filtered_assign["submitted_at"] <= filtered_assign["due"]),
+            True,
+            False
+        )
+        # calculate ratios of on-time assignments
+        assign_ratios = (
+            filtered_assign.groupby("user_id")["on_time"]
+            .value_counts(normalize=True)
+            .reset_index()
+        )
+        # select only ontime rates
+        assign_ratios = assign_ratios[assign_ratios["on_time"]]
+
+        # label student by ontime submission rate
+        assign_ratios.loc[:, "category"] = np.where(
+            assign_ratios["proportion"] >= 0.95,
+            ">95%",
+            None
+        )
+        assign_ratios.loc[:, "category"] = np.where(
+            (assign_ratios["proportion"] >= 0.85) & (assign_ratios["proportion"] < 0.94),
+            "85-94%",
+            assign_ratios["category"]
+        )
+        assign_ratios.loc[:, "category"] = np.where(
+            (assign_ratios["proportion"] < 0.85),
+            "<85%",
+            assign_ratios["category"]
+        )
+
+        # join with students to get names
+        ontime_names = pd.merge(assign_ratios, latest_grades, left_on="user_id", right_on="user_id")[["user_id", "proportion", "name", "category_x"]]
+
+        # calculate proportions of on-time submission sections while preserving student names
+        agg_ontime = (
+            ontime_names
+            .groupby('category_x', as_index=False)
+            .agg(
+                proportion=("proportion", "size"),
+                students=("name", lambda x: "<br>".join(sorted(x)))
+            )
+        )
+        agg_ontime["proportion"] = agg_ontime["proportion"] / agg_ontime["proportion"].sum()
+
+        fig_assign = px.pie(
+            agg_ontime, values='proportion', names='category_x',
+            color="category_x", color_discrete_map=assign_colors,
+            title='Current On-Time Submission Rates', custom_data=["students"]
+        )
+        fig_assign.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5
+            )
+        )
+        fig_assign.update_traces(
+            hole=0.6,
+            hoverlabel=dict(font_size=11),
+            name="",
+            hovertemplate=(
+                "<b>Students in %{label}</b><br>" +
+                "%{customdata[0]}"
+            )
+        )
+
+        select_assign = st.plotly_chart(
+            fig_assign,
+            use_container_width=True,
+            key="assign"
+        )
+
+    bottom_col1, bottom_col2 = st.columns(
+        2, gap="small", vertical_alignment="center", border=True
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    student_data["date"] = pd.to_datetime(student_data["date"])
+
+    with bottom_col1:
+        # Flag students below threshold
+        student_data["grade_outlier"] = student_data["current_grade"] < 75
+
+        # Build figure
+        fig_time = go.Figure()
+
+        for uid, g in student_data.groupby("name"):
+            is_outlier = g["grade_outlier"].any()
+            color = "red" if is_outlier else "grey"
+
+            fig_time.add_trace(
+                go.Scatter(
+                    x=g["date"],
+                    y=g["current_grade"],
+                    mode="lines+markers",
+                    name=str(uid),
+                    line=dict(color=color),
+                    marker=dict(color=color),
+                    showlegend=False
+                )
+            )
+
+        # Update layout
+        fig_time.update_layout(
+            title="GPA Over Time",
+            xaxis_title="Date",
+            yaxis_title="Current Grade",
+            yaxis=dict(range=[0, 100]),
+            template="plotly_white",
+            height=600,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)"
+        )
+
+        st.plotly_chart(fig_time, use_container_width=True)
+
+    with bottom_col2:
+        # Flag students below 2 standard-deviation of log-transformed activity
+        student_data["avg_hours_per_week"] = student_data["total_activity_time"] / 60 / 60 / 28
+        log_vals = np.log1p(student_data["avg_hours_per_week"])
+        threshold = np.expm1(log_vals.mean() - (1 * log_vals.std()))
+
+        student_data["activity_outlier"] = student_data["avg_hours_per_week"] < threshold
+
+        # Build figure
+        fig_time = go.Figure()
+
+        for uid, g in student_data.groupby("name"):
+            is_outlier = g["activity_outlier"].any()
+            color = "red" if is_outlier else "grey"
+
+            fig_time.add_trace(
+                go.Scatter(
+                    x=g["date"],
+                    y=g["avg_hours_per_week"],
+                    mode="lines+markers",
+                    name=str(uid),
+                    line=dict(color=color),
+                    marker=dict(color=color),
+                    showlegend=False
+                )
+            )
+
+        # Update layout
+        fig_time.update_layout(
+            title="Average Activity Spent per Week",
+            xaxis_title="Date",
+            yaxis_title="Rolling Average of Hours per Week",
+            template="plotly_white",
+            height=600,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)"
+        )
+
+        st.plotly_chart(fig_time, use_container_width=True)
