@@ -1,5 +1,6 @@
-streamlit
-st-files-connection
-pandas
-numpy
-plotly
+streamlit>=1.36.0
+st-files-connection>=0.1.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.18.0
+gcsfs>=2024.1.0
