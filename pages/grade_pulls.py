@@ -104,7 +104,7 @@ if not st.session_state.authenticated:
     if password_input:
         if check_password(password_input):
             st.session_state.authenticated = True
-            st.stop()
+            st.rerun()
         else:
             st.error("Incorrect password")
 else:
